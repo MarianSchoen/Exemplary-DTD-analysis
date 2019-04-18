@@ -1,0 +1,462 @@
+---
+title: | 
+  | Digital Tissue Deconvolution 
+  | an exemplary analysis
+author: "Marian Schoen"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    toc: TRUE
+bibliography: DTDexAnalysis.bib
+link-citations: yes
+---
+
+# Overview  
+Loss-Function Learning Digital Tissue Deconvolution has been introduced in [@Goertler2018]. It allows to adapt a deconvolution model to the tissue scenario. Here, I show an exemplary analysis using the corresponding R package 'DTD' (Digital Tissue Deconvolution).  
+In this exemplary analysis I am going to demonstrate how adapting a deconvolution model to its biological context increases the deconvolution accuracy. Additionally, I am going to provide the complete code of the analysis.  
+```{r message=FALSE, warning=FALSE}
+library(DTD)
+
+# additional packages, needed for downloading, visualization etc ...
+library(GEOquery)
+library(kableExtra)
+```
+A DTD analysis consists of the following steps: 
+
+* Preprocess labelled expression profiles (e.g. scRNASeq)
+* Generate a reference matrix and 'in-silicio' mixtures 
+* Train the model
+* Assess the quality of the model 
+* Deconvolute bulks to reconstruct their cellular composition
+
+# Short Introduction to DTD Theory  
+
+<button  type="button"
+   onclick="if(document.getElementById('spoiler0') .style.display=='none')
+              {document.getElementById('spoiler0') .style.display=''}
+            else{document.getElementById('spoiler0') .style.display='none'}">
+  Show/hide
+</button>
+<div id="spoiler0" style="display:none" >
+  The gene expression profile of a tissue combines the expression profiles of all cells in this tissue. Digital tissue deconvolution (DTD) addresses the following inverse problem: Given the expression profile $y$ of a tissue, what is the cellular composition $c$ of cells $X$ in that tissue? The cellular composition $c$ can be estimated by
+  \[
+    \arg \min_c ||y - Xc||_2^2
+  \]
+  Görtler et al (2019) generalized this formula by introducing a vector $g$ 
+  \[
+    \arg \min_c ||diag(g)(y - Xc)||_2^2~~~~~~~~~~~~~~ (2)
+  \]
+  Every entry $g_i$ of $g$ holds the information how important gene i is for the deconvolution process. It can either be selected via prior knowldege, or learned on training data. Training data consists of artificial bulk profiles $Y$, and the corresponding cellular compositions $C$. We generate this data with single cell RNASeq profiles.  
+The underlying idea of loss-function learning DTD is to gain the vector $g$ by minimizing a loss function $L$ on the training set: 
+\[
+  L = -\sum_j cor(C_{j, .}, \widehat{C_{j,.}} (g)) + \lambda ||g||_1
+\]
+Here, $\widehat{C_{j,.}} (g)$ is the solution of formula (2).
+During training we iteratively adjust the $g$ vector in the direction of the gradient $\nabla L$, leading to a $g$ vector, which cellular estimates $\widehat{C}$ correlate best with the known cellular compositions $C$. 
+</div>  
+
+# Data  
+<button  type="button"
+   onclick="if(document.getElementById('Data') .style.display=='none')
+              {document.getElementById('Data') .style.display=''}
+            else{document.getElementById('Data') .style.display='none'}">
+  Show/hide 
+</button>  
+
+<div id="Data" style="display:none" >
+In this exemplary analysis I am going to adapt a deconvolution model to a single-cell RNASeq dataset of melanomas published by [@Tirosh2016].  
+
+
+<button  type="button"
+   onclick="if(document.getElementById('downloadData') .style.display=='none')
+              {document.getElementById('downloadData') .style.display=''}
+            else{document.getElementById('downloadData') .style.display='none'}">
+  Show/hide 
+</button>  
+<div id="downloadData" style="display:none" >  
+
+The dataset can be downloaded via GEO entry 'GSE72056':  
+
+## Downloading  
+
+I am downloading the complete supplement file, as it includes gene counts and labelling (tumor, cell type).
+```{r}
+# download the supplemental file:
+raw <- getGEOSuppFiles(
+  GEO = "GSE72056"
+)
+
+# the getGEOSuppFiles function creates a directory named "GSE72056", 
+# in which the .txt.gz will be stored. Read it in via:
+tirosh.melanoma <- read.table(
+  file = "GSE72056/GSE72056_melanoma_single_cell_revised_v2.txt.gz",
+  stringsAsFactors = FALSE,
+  header = TRUE,
+  sep = "\t"
+)
+# Please notice, that there are duplicated entries in the first column (=> rownames)
+# Therefore the parameter row.names=1 must not be set!
+```
+</div> <!-- downloadData -->  
+
+## Read in and preprocess  
+
+<button  type="button"
+   onclick="if(document.getElementById('preprocess') .style.display=='none')
+              {document.getElementById('preprocess') .style.display=''}
+            else{document.getElementById('preprocess') .style.display='none'}">
+  Show/hide 
+</button>  
+<div id="preprocess" style="display:none" >
+Notice, that in the 'tirosh.melanoma' object, the pheno information (tumor, malignant cell, and non-malignant cell type) is combined with the count matrix.
+I am going to split 'tirosh.melanoma' into a 'tm.pheno' (tm for tirosh melanoma) and 'tm.expr' object.
+```{r}
+# The first 3 rows hold:
+#   - "tumor"
+#   - "malignant(1=no,2=yes,0=unresolved)",
+#   - "non-malignant cell type (1=T,2=B,3=Macro.4=Endo.,5=CAF;6=NK)")
+tm.pheno <- as.matrix(tirosh.melanoma[1:3, -1])
+rownames(tm.pheno) <- tirosh.melanoma[1:3, 1]
+
+# workaround for the duplicated rownames:
+row.names <- as.character(tirosh.melanoma[4:nrow(tirosh.melanoma), 1])
+dupls.pos <- which(duplicated(row.names))
+unique.names <- paste0(row.names[dupls.pos], "--2")
+row.names[dupls.pos] <- unique.names
+# undo log transformation (DTD works on an additive scale, not a multiplicative) ...
+tm.expr <- as.matrix(2^(tirosh.melanoma[4:nrow(tirosh.melanoma), -1]) - 1)
+# ... normalize each profile to a fixed number of counts...
+tm.expr <- normalize_to_count(tm.expr)
+# ... and reset the rownames.
+rownames(tm.expr) <- row.names
+```
+</div> 
+## Pheno information  
+
+<button  type="button"
+   onclick="if(document.getElementById('showPheno') .style.display=='none')
+              {document.getElementById('showPheno') .style.display=''}
+            else{document.getElementById('showPheno') .style.display='none'}">
+  Show/hide
+</button>  
+<div id="showPheno" style="display:none" >
+The `tm.pheno` matrix holds 3 rows.  The first row indicates the `"tumor"`. Every single cell profile with the same `"tumor"` entry originates from the same sample. The second row holds the `"malignant"` information. The third row gives the annotated cell type for each profile. Notice, all pheno entries are adapted from [@Tirosh2016].
+In the raw data, `"malignant"` and `"CellType"` are given as numeric values. The following functions map these numeric values to strings: 
+```{r echo=TRUE}
+map.malignant <- function(x) {
+  if (x == 1) return("NOT_malignant")
+  if (x == 2) return("malignant")
+  if (x == 3) return("unresolved")
+  return("unassigned")
+}
+map.cell.type <- function(x) {
+  if (x == 1) {
+    return("T")
+  }
+  if (x == 2) {
+    return("B")
+  }
+  if (x == 3) {
+    return("Macro")
+  }
+  if (x == 4) {
+    return("Endo")
+  }
+  if (x == 5) {
+    return("CAF")
+  }
+  if (x == 6) {
+    return("NK")
+  }
+  return("unknown")
+}
+tm.pheno.readable <- data.frame(
+  "tumor" = tm.pheno["tumor", ],
+  "malignant" = sapply(
+    tm.pheno["malignant(1=no,2=yes,0=unresolved)", ],
+    map.malignant
+  ),
+  "CellType" = sapply(
+    tm.pheno["non-malignant cell type (1=T,2=B,3=Macro.4=Endo.,5=CAF;6=NK)", ],
+    map.cell.type
+  )
+)
+```
+```{r}
+scroll_box(kable_styling(kable(tm.pheno.readable)),
+  height = "200pt", width = "100%"
+)
+```
+</div> <!-- showPheno --> 
+
+## Single Cell Profiles  
+
+<button  type="button"
+   onclick="if(document.getElementById('scPro') .style.display=='none')
+              {document.getElementById('scPro') .style.display=''}
+            else{document.getElementById('scPro') .style.display='none'}">
+  Show/hide
+</button>  
+<div id="scPro" style="display:none" >
+In the dataset there are `r nrow(tm.expr)` features, and `r ncol(tm.expr)` single cell profiles. Each profile has been normalized to a fixed number of counts(via the `DTD::normalize_to_count` function, in the preprocess section):
+```{r}
+head(apply(tm.expr, 2, sum))
+```
+Notice, that each row in the `tm.expr` matrix corresponds to a feature, and a column to a single cell profile: 
+```{r}
+tm.expr[1:5, 1:2]
+```
+
+
+</div> <!-- SC profiles -->
+
+## Reconstructing Infered Bulk Profiles  
+
+<button  type="button"
+   onclick="if(document.getElementById('recBulk') .style.display=='none')
+              {document.getElementById('recBulk') .style.display=''}
+            else{document.getElementById('recBulk') .style.display='none'}">
+  Show/hide
+</button>  
+<div id="recBulk" style="display:none" >
+The dataset consists of `r ncol(tm.expr)` single cell profiles from `r length(unique(tm.pheno.readable$tumor))` tumors. In order to demonstrate how to apply the model on bulk data, I reconstruct the bulk profiles by summing up all single-cell profiles from the same tumor. 
+```{r}
+tumor.names <- as.character(unique(tm.pheno.readable$tumor))
+
+# initialize emtpy expression matrix ...
+bulk.exprs <- matrix(NA,
+  nrow = nrow(tm.expr),
+  ncol = length(tumor.names)
+)
+rownames(bulk.exprs) <- rownames(tm.expr)
+colnames(bulk.exprs) <- tumor.names
+
+# ... and pheno matrix
+bulk.pheno <- matrix(0,
+  nrow = length(tumor.names),
+  ncol = length(unique(tm.pheno.readable$CellType))
+)
+rownames(bulk.pheno) <- tumor.names
+colnames(bulk.pheno) <- unique(tm.pheno.readable$CellType)
+
+# iterate over each tumor, and sum up all its profiles:
+for (l.tumor in tumor.names) {
+  tmp.samples <- names(which(tm.pheno[1, ] == l.tumor))
+  bulk.exprs[, l.tumor] <- rowSums(tm.expr[, tmp.samples])
+
+  tmp.table <- table(tm.pheno.readable[tmp.samples, "CellType"])
+  bulk.pheno[l.tumor, names(tmp.table)] <- tmp.table / sum(tmp.table)
+}
+# normalize the profiles:
+bulk.exprs <- normalize_to_count(bulk.exprs, count = 100)
+```
+</div> <!-- recBulk -->
+</div> <!-- Data -->  
+
+# DTD Analysis  
+
+All previous steps concern downloading and processing the exemplary data set. In this section, the **DTD** analysis starts, all function calls are data-set independent.  
+Start your **DTD** analysis by setting a seed. Then, construct a vector that maps single cell profiles to cell types, and choose which cell types should be included in the reference matrix $X$. 
+```{r}
+set.seed(1)
+indicator.list <- as.character(tm.pheno.readable$CellType)
+names(indicator.list) <- rownames(tm.pheno.readable)
+print(head(indicator.list))
+include.in.X <- c("B", "CAF", "Endo", "Macro", "NK", "T", "unknown")
+```
+
+## Generate reference matrix X  
+
+Using the `indicator.list` and the `include.in.X` vectors we can generate a reference matrix $X$. Here, for every entry of `include.in.X` we randomly select 10% of all cells of that type, and average over them. All samples that have been used in creating $X$ must not be used any further, and have to be excluded from the expression matrix. 
+```{r}
+sample.X <- sample_random_X(
+  included.in.X = include.in.X,
+  pheno = indicator.list,
+  exp.data = tm.expr,
+  percentage.of.all.cells = 0.1,
+  normalize_profiles = TRUE
+)
+
+X.matrix <- sample.X$X.matrix
+samples.to.remove <- sample.X$samples.to.remove
+
+remaining.expr <- tm.expr[, -which(colnames(tm.expr) %in% samples.to.remove)]
+```
+Next, we are going to reduce the number of features. Actually, loss-function learning digital tissue deconvolution performs a feature selection, and we could start the algorithm on all `r nrow(X.matrix)` features. However, due to runtime reasons, we preselect a set of features. This selection will be done via standard deviation in the reference matrix $X$. 
+```{r}
+n.features <- 500 
+
+sds.in.x <- rowSds(X.matrix)
+names(sds.in.x) <- rownames(X.matrix)
+sorted.sds.in.x <- sort(sds.in.x, decreasing = TRUE)
+selected.feature <- names(sorted.sds.in.x)[1:n.features]
+
+X.matrix <- X.matrix[selected.feature, ]
+remaining.expr <- remaining.expr[selected.feature, ]
+```
+
+## Generate training and test 'in-silicio' mixtures  
+
+Next, we are going to randomly mix single cell profiles, resulting in artificial 'in-silicio' bulks. We will use the training set to train the model, and after that validate it on a test set. Therefore, split all remaining profiles in a disjoint training and test set. Mix the sets with the **DTD** function `mix_samples`. The number of samples must be set as an hyperparameter. Experience shows that as many training samples as there are features in the model result in good deconvolution outcome. Notice, the number of training samples increases the run time. Another hyperparameter is the number of single cell profiles per 'in-silicio' mixture. This parameter depends on the dimension of the expression matrix.  
+```{r}
+# rule of thumb:
+n.samples <- n.features
+# there are 4645 SC profiles, set 'n.per.mixture' 10% of that => ~400
+n.per.mixture <- 400
+
+# split all profiles randomly into training and testing
+train.samples <- sample(
+  x = colnames(remaining.expr),
+  size = ceiling(ncol(remaining.expr) / 2),
+  replace = FALSE
+)
+test.samples <- colnames(remaining.expr)[which(!colnames(remaining.expr) %in% train.samples)]
+
+# extract training data ...
+train.expr <- remaining.expr[, train.samples]
+# ... and training indicator list.
+indicator.train <- indicator.list[train.samples]
+
+# same for test:
+test.expr <- remaining.expr[, test.samples]
+indicator.test <- indicator.list[test.samples]
+
+# apply the function:
+training.data <- mix_samples(
+  exp.data = train.expr,
+  pheno = indicator.train,
+  included.in.X = include.in.X,
+  n.samples = n.samples,
+  n.per.mixture = n.per.mixture,
+  verbose = FALSE
+)
+
+test.data <- mix_samples(
+  exp.data = test.expr,
+  pheno = indicator.test,
+  included.in.X = include.in.X,
+  n.samples = n.samples,
+  n.per.mixture = n.per.mixture,
+  verbose = FALSE
+)
+```
+
+## Assess the standard deconvolution model  
+
+In this section, I show why adapting the deconvolution model onto the tissue scenario is important. We can deconvolute test set and bulk profiles with the standard deconvolution model. If $g=1$, the standard deconvolution model can be seen in formula (2) - section 'Short Introduction to DTD Theory'. The following pictures show the deconvolution result per cell type on the test set and the bulk profiles. For both, test set and bulk profiles, the deconvolution accuracy is low. 
+```{r}
+standard.model <- rep(1, n.features)
+names(standard.model) <- selected.feature
+ggplot_true_vs_esti(
+  DTD.model = standard.model,
+  X.matrix = X.matrix,
+  test.data = test.data,
+  estimate.c.type = "direct",
+  title = " test bulks; standard model: g=1"
+)
+
+bulk.list <- list(
+  "mixtures" = normalize_to_count(bulk.exprs[selected.feature, ]),
+  "quantities" = t(bulk.pheno[, colnames(X.matrix)])
+)
+ggplot_true_vs_esti(
+  DTD.model = standard.model,
+  X.matrix = X.matrix,
+  test.data = bulk.list,
+  estimate.c.type = "direct"
+)
+```
+
+## Train a deconvolution model  
+
+Using the `train_deconvolution_model` function a deconvolution model is adapted to the tissue scenario. In that function several hyperparameters can be set via `...`. They will be passed to `DTD_cv_lambda` and `descent_generalized_fista`.   
+The `train_deconvolution_model` function finds the best fitting lambda via cross validation, and then builds a model on the complete training data. After that, it automatically calls plot functions with default parameter, and stores the pictures in the `pic` entry of the model list. Notice, if a vector of $\lambda$ is passed to the algorithm via the 'lambda.seq' parameter, the algorithm will use this vector for cross validation. If 'lambda.seq' is not set, the algorithm internally generates a vector of $\lambda$ based on the dimension of the `training.data`.
+```{r}
+start.tweak <- rep(1, n.features)
+names(start.tweak) <- selected.feature
+lambda.sequence <- 2^seq(0, -50, length.out = 20)
+model <- train_deconvolution_model(
+  tweak = start.tweak,
+  X.matrix = X.matrix,
+  train.data.list = training.data,
+  test.data.list = test.data,
+  estimate.c.type = "direct",
+  maxit = 50,
+  lambda.seq = lambda.sequence,
+  verbose = FALSE,
+  cv.verbose = TRUE,
+  warm.start = TRUE
+)
+```
+
+
+## Assess the trained deconvolution model  
+
+In this section, I show visualizations of the training process of the model. 
+In the first plot the cross validation is visualized. The selected $\lambda$ is indicated via the red dot. Notice, in the `ggplot_cv` function the parameter `upper.x.axis.info` can be set to either `"non-zero"` or `"geometric-mean"`. If set to `"geometric-mean"`, the upper x axis shows the geometric mean of the weight vector $g$ per $\lambda$, averaged over all folds. 
+
+```{r}
+print(model$pics$cv)
+```
+
+In the `convergence` entry, the visualization of the loss L against the iteration of the gradient descent is shown. If the `test.data` is provided to the `ggplot_convergence` function, and all intermediate $g$ vectors are stored in the model, the test convergence is visualized as well: 
+
+```{r}
+print(model$pics$convergence)
+```
+
+In the `path` entry, the path of each $g_i$ is visualized over all iterations. Notice, that by default, the legend is not plotted. In the `ggplot_gpath` function the parameter `show.legend` can be set `TRUE`, then a legend is plotted as well. 
+
+```{r}
+print(model$pics$path)
+```
+
+The distribution of the $g$ vector is visualized as a histogram in the `histogram` entry. Basically, if gene $i$ has a deconvolution potential, its entry $g_i$ will potentially be high, even though the absolute size of $g$ can not be interpreted directly: 
+
+```{r}
+print(model$pics$histogram)
+```
+
+The effect of the $g$-vector on deconvolution can be visualized when plotting the reference matrix $X$, multiplied with $g$, as a heatmap. Plot it via the `Xheatmap` entry, or the `ggplot_heatmap` function. Rows and columns are clustered hierarchically. The heatmap becomes more informative if only a subset of features is included. A subset can be selected via the `feature.subset` parameter: 
+
+```{r}
+#print(model$pics$Xheatmap)
+ggplot_heatmap(
+  DTD.model = model, 
+  X.matrix = X.matrix, 
+  test.data = test.data, 
+  estimate.c.type = "direct", 
+  title = "Heatmap of diag(g) %*% X", 
+  feature.subset = 20
+)
+```
+
+Last but not least, the 'true C versus estimated $\widehat{C}(g)$' plot (as for the untrained model) is plotted:
+
+```{r}
+print(model$pics$true_vs_esti)
+```
+
+## Deconvolute bulk profiles  
+
+A **DTD** model can be applied to estimate cellular compositions via the `estimate_c` or `estimate_nn_c` (for estimate non negative c) functions. As input, both take a reference matrix $X$, the data to be deconvoluted (notice, a expression matrix, not a list), and the **DTD** model. The output is a estimated cellular composition matrix $\widehat{C}(g)$. Visualizing 'true C versus estimated $\widehat{C}(g)$' can be done with the `ggplot_true_vs_esti` function. Pass the `bulk.list` to the `test.data` parameter. 
+
+```{r}
+# estimate cellular compositions of bulk profiles:
+estimated.c.bulk <- estimate_c(
+  X.matrix = X.matrix, 
+  new.data = bulk.list$mixtures, 
+  DTD.model = model
+)
+# visualize true bulk C versus estimated bulk C: 
+ggplot_true_vs_esti(
+  DTD.model = model,
+  X.matrix = X.matrix,
+  test.data = bulk.list,
+  estimate.c.type = "direct"
+)
+```
+
+
+# References  
