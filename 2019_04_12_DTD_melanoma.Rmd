@@ -47,7 +47,7 @@ A DTD analysis consists of the following steps:
   \[
     \arg \min_c ||diag(g)(y - Xc)||_2^2~~~~~~~~~~~~~~ (2)
   \]
-  Every entry $g_i$ of $g$ holds the information how important gene i is for the deconvolution process. It can either be selected via prior knowldege, or learned on training data. Training data consists of artificial bulk profiles $Y$, and the corresponding cellular compositions $C$. We generate this data with single cell RNASeq profiles.  
+  Every entry $g_i$ of $g$ holds the information how important gene i is for the deconvolution process. It can either be selected via prior knowledge, or learned on training data. Training data consists of artificial bulk profiles $Y$, and the corresponding cellular compositions $C$. We generate this data with single cell RNASeq profiles.  
 The underlying idea of loss-function learning DTD is to gain the vector $g$ by minimizing a loss function $L$ on the training set: 
 \[
   L = -\sum_j cor(C_{j, .}, \widehat{C_{j,.}} (g)) + \lambda ||g||_1
@@ -80,7 +80,7 @@ The dataset can be downloaded via GEO entry 'GSE72056':
 
 ## Downloading  
 
-I am downloading the complete supplement file, as it includes gene counts and labelling (tumor, cell type).
+I am downloading the complete supplement file, as it includes gene counts and labeling (tumor, cell type).
 ```{r}
 # download the supplemental file:
 raw <- getGEOSuppFiles(
@@ -283,7 +283,7 @@ samples.to.remove <- sample.X$samples.to.remove
 
 remaining.expr <- tm.expr[, -which(colnames(tm.expr) %in% samples.to.remove)]
 ```
-Next, we are going to reduce the number of features. Actually, loss-function learning digital tissue deconvolution performs a feature selection, and we could start the algorithm on all `r nrow(X.matrix)` features. However, due to runtime reasons, we preselect a set of features. This selection will be done via standard deviation in the reference matrix $X$. 
+Next, we are going to reduce the number of features. Actually, loss-function learning digital tissue deconvolution performs a feature selection, and we could start the algorithm on all `r nrow(X.matrix)` features. However, due to run time reasons, we preselect a set of features. This selection will be done via standard deviation in the reference matrix $X$. 
 ```{r}
 n.features <- 500 
 
